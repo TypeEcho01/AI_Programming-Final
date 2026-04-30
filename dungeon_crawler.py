@@ -22,6 +22,8 @@ class Room:
     exits: Dict[str, "Room"] = field(default_factory=dict)
     items: List[str] = field(default_factory=list)
     enemy: Optional[str] = None
+    locked: bool = False
+    lock_reason: str = ""
 
     def connect(self, direction: str, other: "Room") -> None:
         """Create a bidirectional connection between rooms."""
@@ -37,7 +39,9 @@ class Room:
 class Player:
     current_room: Room
     hp: int = 20
+    max_hp: int = 20
     inventory: List[str] = field(default_factory=list)
+    gold: int = 0
 
 
 class DungeonGame:
@@ -57,16 +61,17 @@ class DungeonGame:
         entrance = Room(
             "Entrance",
             "A cold stone archway. A faded rune glows above you.",
-            items=["torch"],
+            items=["torch", "small potion"],
         )
         hall = Room(
             "Hall",
             "An echoing hall lined with cracked statues.",
+            items=["lockpick"],
         )
         armory = Room(
             "Armory",
             "Rusty blades hang on hooks. One still looks usable.",
-            items=["iron sword"],
+            items=["iron sword", "wooden shield"],
         )
         shrine = Room(
             "Shrine",
@@ -77,8 +82,10 @@ class DungeonGame:
         vault = Room(
             "Vault",
             "An iron vault door stands open. Treasure glitters inside.",
-            items=["ancient coin"],
+            items=["ancient coin", "ruby idol", "old map"],
             enemy="skeletal guardian",
+            locked=True,
+            lock_reason="A heavy gate blocks the way. Maybe a lockpick could open it.",
         )
 
         entrance.connect("north", hall)
@@ -86,10 +93,7 @@ class DungeonGame:
         hall.connect("north", shrine)
         shrine.connect("east", vault)
 
-        return {
-            room.name: room
-            for room in [entrance, hall, armory, shrine, vault]
-        }
+        return {room.name: room for room in [entrance, hall, armory, shrine, vault]}
 
     def start(self) -> None:
         print("Welcome to the Dungeon Crawler!")
@@ -127,6 +131,11 @@ class DungeonGame:
                     print("Take what?")
                 else:
                     self.take(" ".join(args))
+            case "drop":
+                if not args:
+                    print("Drop what?")
+                else:
+                    self.drop(" ".join(args))
             case "attack":
                 self.attack()
             case "inventory":
@@ -136,6 +145,16 @@ class DungeonGame:
                     print("Use what?")
                 else:
                     self.use_item(" ".join(args))
+            case "stats":
+                self.stats()
+            case "search":
+                self.search()
+            case "rest":
+                self.rest()
+            case "unlock":
+                self.unlock()
+            case "map":
+                self.show_map()
             case "quit" | "exit":
                 print("You leave the dungeon.")
                 self.running = False
@@ -144,8 +163,8 @@ class DungeonGame:
 
     def help(self) -> None:
         print(
-            "Commands: help, look, go <direction>, take <item>, "
-            "attack, use <item>, inventory, quit"
+            "Commands: help, look, go <direction>, take <item>, drop <item>, "
+            "attack, use <item>, unlock, search, map, rest, stats, inventory, quit"
         )
 
     def look(self) -> None:
@@ -170,6 +189,10 @@ class DungeonGame:
             print("You can't go that way.")
             return
 
+        if target.locked:
+            print(target.lock_reason)
+            return
+
         self.player.current_room = target
         self.look()
 
@@ -183,8 +206,26 @@ class DungeonGame:
 
         real_name = lowered[item_name]
         room.items.remove(real_name)
+
+        if real_name in {"ancient coin", "ruby idol"}:
+            value = 5 if real_name == "ancient coin" else 20
+            self.player.gold += value
+            print(f"You pocket the {real_name} and gain {value} gold.")
+            return
+
         self.player.inventory.append(real_name)
         print(f"You took {real_name}.")
+
+    def drop(self, item_name: str) -> None:
+        lowered = {item.lower(): item for item in self.player.inventory}
+        if item_name not in lowered:
+            print("You don't have that item.")
+            return
+
+        real_name = lowered[item_name]
+        self.player.inventory.remove(real_name)
+        self.player.current_room.items.append(real_name)
+        print(f"You dropped {real_name}.")
 
     def attack(self) -> None:
         room = self.player.current_room
@@ -201,8 +242,12 @@ class DungeonGame:
         if player_roll >= enemy_roll:
             print(f"You defeated the {room.enemy}!")
             room.enemy = None
+            self.player.gold += 3
+            print("You collect 3 gold from the remains.")
         else:
             damage = random.randint(2, 5)
+            if "wooden shield" in self.player.inventory:
+                damage = max(1, damage - 1)
             self.player.hp -= damage
             print(f"The {room.enemy} hits you for {damage} damage. HP: {self.player.hp}")
 
@@ -216,14 +261,71 @@ class DungeonGame:
 
         if real_name == "healing herb":
             heal = 6
-            self.player.hp += heal
+            self.player.hp = min(self.player.max_hp, self.player.hp + heal)
             self.player.inventory.remove(real_name)
-            print(f"You use the healing herb and recover {heal} HP. HP: {self.player.hp}")
+            print(f"You use the healing herb and recover HP. HP: {self.player.hp}")
+        elif real_name == "small potion":
+            heal = 10
+            self.player.hp = min(self.player.max_hp, self.player.hp + heal)
+            self.player.inventory.remove(real_name)
+            print(f"You drink the small potion and recover HP. HP: {self.player.hp}")
+        elif real_name == "old map":
+            self.show_map()
         else:
             print(f"You can't use {real_name} right now.")
 
+    def unlock(self) -> None:
+        room = self.player.current_room
+        locked_neighbors = [r for r in room.exits.values() if r.locked]
+        if not locked_neighbors:
+            print("There is nothing nearby to unlock.")
+            return
+
+        if "lockpick" not in self.player.inventory:
+            print("You need a lockpick to unlock this path.")
+            return
+
+        target = locked_neighbors[0]
+        target.locked = False
+        print(f"You unlock access to {target.name}.")
+
+    def search(self) -> None:
+        room = self.player.current_room
+        found_gold = random.randint(1, 4)
+        self.player.gold += found_gold
+        print(f"You search carefully and find {found_gold} gold.")
+
+        if not room.enemy and random.random() < 0.25:
+            room.enemy = "wandering rat"
+            print("A wandering rat appears!")
+
+    def rest(self) -> None:
+        room = self.player.current_room
+        if room.enemy:
+            print("You can't rest while an enemy is here!")
+            return
+
+        healed = random.randint(2, 5)
+        old_hp = self.player.hp
+        self.player.hp = min(self.player.max_hp, self.player.hp + healed)
+        print(f"You rest for a moment. HP: {old_hp} -> {self.player.hp}")
+
+    def stats(self) -> None:
+        print(f"HP: {self.player.hp}/{self.player.max_hp}")
+        print(f"Gold: {self.player.gold}")
+        weapon = "iron sword" if "iron sword" in self.player.inventory else "none"
+        shield = "wooden shield" if "wooden shield" in self.player.inventory else "none"
+        print(f"Weapon: {weapon}")
+        print(f"Shield: {shield}")
+
+    def show_map(self) -> None:
+        print("\nDungeon map:")
+        print("  [Entrance] --north--> [Hall] --north--> [Shrine] --east--> [Vault]")
+        print("                        |")
+        print("                        +--east--> [Armory]")
+
     def show_inventory(self) -> None:
-        print(f"HP: {self.player.hp}")
+        print(f"HP: {self.player.hp}/{self.player.max_hp} | Gold: {self.player.gold}")
         if not self.player.inventory:
             print("Inventory: empty")
             return
