@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional
+
+
+SAVE_FILE = Path("dungeon_save.json")
+SAVE_VERSION = 1
 
 
 DIRECTIONS = {
@@ -147,6 +153,13 @@ class DungeonGame:
                     self.use_item(" ".join(args))
             case "stats":
                 self.stats()
+            case "save":
+                self.save_game()
+            case "load" | "continue":
+                if self.load_game():
+                    self.look()
+            case "new":
+                self.new_game()
             case "search":
                 self.search()
             case "rest":
@@ -156,7 +169,7 @@ class DungeonGame:
             case "map":
                 self.show_map()
             case "quit" | "exit":
-                print("You leave the dungeon.")
+                print("You leave the dungeon. Use 'save' first if you want to keep progress.")
                 self.running = False
             case _:
                 print("Unknown command. Type 'help' for options.")
@@ -164,7 +177,8 @@ class DungeonGame:
     def help(self) -> None:
         print(
             "Commands: help, look, go <direction>, take <item>, drop <item>, "
-            "attack, use <item>, unlock, search, map, rest, stats, inventory, quit"
+            "attack, use <item>, unlock, search, map, rest, stats, inventory, "
+            "save, load, new, quit"
         )
 
     def look(self) -> None:
@@ -289,6 +303,76 @@ class DungeonGame:
         target.locked = False
         print(f"You unlock access to {target.name}.")
 
+    def save_game(self) -> None:
+        """Write the current player and room state to disk."""
+        save_data = {
+            "version": SAVE_VERSION,
+            "player": {
+                "current_room": self.player.current_room.name,
+                "hp": self.player.hp,
+                "max_hp": self.player.max_hp,
+                "inventory": self.player.inventory,
+                "gold": self.player.gold,
+            },
+            "rooms": {
+                name: {
+                    "items": room.items,
+                    "enemy": room.enemy,
+                    "locked": room.locked,
+                }
+                for name, room in self.rooms.items()
+            },
+        }
+
+        SAVE_FILE.write_text(json.dumps(save_data, indent=2), encoding="utf-8")
+        print(f"Game saved to {SAVE_FILE}.")
+
+    def load_game(self) -> bool:
+        """Load player and mutable room state from disk."""
+        if not SAVE_FILE.exists():
+            print("No saved game found. Start exploring, then use 'save'.")
+            return False
+
+        try:
+            save_data = json.loads(SAVE_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            print("Save file is damaged and could not be loaded.")
+            return False
+
+        if save_data.get("version") != SAVE_VERSION:
+            print("Save file version is not compatible with this game build.")
+            return False
+
+        player_data = save_data.get("player", {})
+        room_data = save_data.get("rooms", {})
+        current_room_name = player_data.get("current_room", "Entrance")
+
+        self.rooms = self._build_world()
+        for name, saved_room in room_data.items():
+            room = self.rooms.get(name)
+            if not room:
+                continue
+            room.items = list(saved_room.get("items", room.items))
+            room.enemy = saved_room.get("enemy")
+            room.locked = bool(saved_room.get("locked", room.locked))
+
+        self.player = Player(
+            current_room=self.rooms.get(current_room_name, self.rooms["Entrance"]),
+            hp=int(player_data.get("hp", 20)),
+            max_hp=int(player_data.get("max_hp", 20)),
+            inventory=list(player_data.get("inventory", [])),
+            gold=int(player_data.get("gold", 0)),
+        )
+        print(f"Loaded saved game from {SAVE_FILE}.")
+        return True
+
+    def new_game(self) -> None:
+        """Reset the dungeon to a fresh run."""
+        self.rooms = self._build_world()
+        self.player = Player(current_room=self.rooms["Entrance"])
+        print("Started a new game. Use 'save' to overwrite any existing save.")
+        self.look()
+
     def search(self) -> None:
         room = self.player.current_room
         found_gold = random.randint(1, 4)
@@ -332,5 +416,20 @@ class DungeonGame:
         print("Inventory:", ", ".join(self.player.inventory))
 
 
+def choose_game() -> DungeonGame:
+    """Create a game and optionally restore progress before the loop starts."""
+    game = DungeonGame()
+    if not SAVE_FILE.exists():
+        return game
+
+    print(f"Saved progress found at {SAVE_FILE}.")
+    choice = input("Continue saved game? (c = continue, n = new): ").strip().lower()
+    if choice in {"c", "continue", "y", "yes", "load"}:
+        game.load_game()
+    else:
+        print("Starting a fresh game. Your old save remains until you use 'save'.")
+    return game
+
+
 if __name__ == "__main__":
-    DungeonGame().start()
+    choose_game().start()
