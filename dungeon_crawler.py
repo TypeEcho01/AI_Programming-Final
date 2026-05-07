@@ -11,6 +11,13 @@ SAVE_FILE = Path("dungeon_save.json")
 SAVE_VERSION = 1
 
 
+ENEMY_GOLD_REWARDS = {
+    "cult acolyte": 8,
+    "skeletal guardian": 18,
+    "wandering rat": 3,
+}
+
+
 DIRECTIONS = {
     "north": "south",
     "south": "north",
@@ -30,6 +37,7 @@ class Room:
     enemy: Optional[str] = None
     locked: bool = False
     lock_reason: str = ""
+    shop_items: Dict[str, int] = field(default_factory=dict)
 
     def connect(self, direction: str, other: "Room") -> None:
         """Create a bidirectional connection between rooms."""
@@ -74,6 +82,16 @@ class DungeonGame:
             "An echoing hall lined with cracked statues.",
             items=["lockpick"],
         )
+        merchant = Room(
+            "Merchant Nook",
+            "A nervous goblin merchant has set up a blanket of useful supplies.",
+            shop_items={
+                "healing herb": 5,
+                "small potion": 9,
+                "lockpick": 7,
+                "throwing dagger": 10,
+            },
+        )
         armory = Room(
             "Armory",
             "Rusty blades hang on hooks. One still looks usable.",
@@ -95,11 +113,15 @@ class DungeonGame:
         )
 
         entrance.connect("north", hall)
+        hall.connect("west", merchant)
         hall.connect("east", armory)
         hall.connect("north", shrine)
         shrine.connect("east", vault)
 
-        return {room.name: room for room in [entrance, hall, armory, shrine, vault]}
+        return {
+            room.name: room
+            for room in [entrance, hall, merchant, armory, shrine, vault]
+        }
 
     def start(self) -> None:
         print("Welcome to the Dungeon Crawler!")
@@ -137,6 +159,13 @@ class DungeonGame:
                     print("Take what?")
                 else:
                     self.take(" ".join(args))
+            case "shop":
+                self.show_shop()
+            case "buy":
+                if not args:
+                    print("Buy what?")
+                else:
+                    self.buy(" ".join(args))
             case "drop":
                 if not args:
                     print("Drop what?")
@@ -177,8 +206,8 @@ class DungeonGame:
     def help(self) -> None:
         print(
             "Commands: help, look, go <direction>, take <item>, drop <item>, "
-            "attack, use <item>, unlock, search, map, rest, stats, inventory, "
-            "save, load, new, quit"
+            "shop, buy <item>, attack, use <item>, unlock, search, map, rest, "
+            "stats, inventory, save, load, new, quit"
         )
 
     def look(self) -> None:
@@ -191,6 +220,9 @@ class DungeonGame:
 
         if room.items:
             print("You see:", ", ".join(room.items))
+
+        if room.shop_items:
+            print("A shop is here. Type 'shop' to see what is for sale.")
 
         if room.exits:
             print("Exits:", ", ".join(room.exits.keys()))
@@ -221,12 +253,6 @@ class DungeonGame:
         real_name = lowered[item_name]
         room.items.remove(real_name)
 
-        if real_name in {"ancient coin", "ruby idol"}:
-            value = 5 if real_name == "ancient coin" else 20
-            self.player.gold += value
-            print(f"You pocket the {real_name} and gain {value} gold.")
-            return
-
         self.player.inventory.append(real_name)
         print(f"You took {real_name}.")
 
@@ -241,6 +267,43 @@ class DungeonGame:
         self.player.current_room.items.append(real_name)
         print(f"You dropped {real_name}.")
 
+    def show_shop(self) -> None:
+        room = self.player.current_room
+        if not room.shop_items:
+            print("There is no shop here.")
+            return
+
+        print("For sale:")
+        for item, price in room.shop_items.items():
+            print(f"- {item}: {price} gold")
+        print(f"Your gold: {self.player.gold}")
+        print("Use 'buy <item>' to purchase supplies.")
+
+    def buy(self, item_name: str) -> None:
+        room = self.player.current_room
+        lowered = {item.lower(): item for item in room.shop_items}
+
+        if not lowered:
+            print("There is no shop here.")
+            return
+
+        if item_name not in lowered:
+            print("That item is not for sale here.")
+            return
+
+        real_name = lowered[item_name]
+        price = room.shop_items[real_name]
+        if self.player.gold < price:
+            print(
+                f"You need {price} gold to buy {real_name}. "
+                f"You only have {self.player.gold}."
+            )
+            return
+
+        self.player.gold -= price
+        self.player.inventory.append(real_name)
+        print(f"You bought {real_name} for {price} gold. Gold left: {self.player.gold}")
+
     def attack(self) -> None:
         room = self.player.current_room
         if not room.enemy:
@@ -254,10 +317,11 @@ class DungeonGame:
             player_roll += 2
 
         if player_roll >= enemy_roll:
+            reward = ENEMY_GOLD_REWARDS.get(room.enemy, 4)
             print(f"You defeated the {room.enemy}!")
             room.enemy = None
-            self.player.gold += 3
-            print("You collect 3 gold from the remains.")
+            self.player.gold += reward
+            print(f"You collect {reward} gold from the remains.")
         else:
             damage = random.randint(2, 5)
             if "wooden shield" in self.player.inventory:
@@ -285,6 +349,16 @@ class DungeonGame:
             print(f"You drink the small potion and recover HP. HP: {self.player.hp}")
         elif real_name == "old map":
             self.show_map()
+        elif real_name == "throwing dagger":
+            self.player.inventory.remove(real_name)
+            if self.player.current_room.enemy:
+                reward = ENEMY_GOLD_REWARDS.get(self.player.current_room.enemy, 4)
+                print(f"You throw the dagger and defeat the {self.player.current_room.enemy}!")
+                self.player.current_room.enemy = None
+                self.player.gold += reward
+                print(f"You collect {reward} gold from the remains.")
+            else:
+                print("You toss the dagger into the shadows, but there is no enemy here.")
         else:
             print(f"You can't use {real_name} right now.")
 
@@ -319,6 +393,7 @@ class DungeonGame:
                     "items": room.items,
                     "enemy": room.enemy,
                     "locked": room.locked,
+                    "shop_items": room.shop_items,
                 }
                 for name, room in self.rooms.items()
             },
@@ -355,6 +430,7 @@ class DungeonGame:
             room.items = list(saved_room.get("items", room.items))
             room.enemy = saved_room.get("enemy")
             room.locked = bool(saved_room.get("locked", room.locked))
+            room.shop_items = dict(saved_room.get("shop_items", room.shop_items))
 
         self.player = Player(
             current_room=self.rooms.get(current_room_name, self.rooms["Entrance"]),
@@ -375,9 +451,11 @@ class DungeonGame:
 
     def search(self) -> None:
         room = self.player.current_room
-        found_gold = random.randint(1, 4)
-        self.player.gold += found_gold
-        print(f"You search carefully and find {found_gold} gold.")
+        print("You search carefully for danger, tracks, and hidden supplies.")
+
+        if not room.items and random.random() < 0.2:
+            room.items.append("healing herb")
+            print("You uncover a hidden healing herb.")
 
         if not room.enemy and random.random() < 0.25:
             room.enemy = "wandering rat"
@@ -407,6 +485,8 @@ class DungeonGame:
         print("  [Entrance] --north--> [Hall] --north--> [Shrine] --east--> [Vault]")
         print("                        |")
         print("                        +--east--> [Armory]")
+        print("                        |")
+        print("                        +--west--> [Merchant Nook]")
 
     def show_inventory(self) -> None:
         print(f"HP: {self.player.hp}/{self.player.max_hp} | Gold: {self.player.gold}")

@@ -17,6 +17,8 @@ If a `dungeon_save.json` file exists, the game asks whether you want to continue
 - `go <direction>`
 - `take <item>`
 - `drop <item>`
+- `shop`
+- `buy <item>`
 - `attack`
 - `use <item>`
 - `unlock`
@@ -35,9 +37,10 @@ If a `dungeon_save.json` file exists, the game asks whether you want to continue
 - Room graph with directional movement
 - Locked room flow (`unlock` + `lockpick`)
 - Inventory and drop system
-- Basic enemy combat with equipment effects
-- Item usage (healing herb, potion, map)
-- Gold economy through loot, combat, and searching
+- Basic enemy combat with equipment effects and gold rewards
+- Merchant shop for buying supplies with gold earned from defeated enemies
+- Item usage (healing herb, potion, map, throwing dagger)
+- Gold economy focused on combat rewards and shop spending
 - Extra utility commands (`stats`, `map`, `rest`, `search`)
 - Save/load support using a local `dungeon_save.json` file
 - Startup choice to continue saved progress or begin a new game
@@ -51,4 +54,4 @@ The code is intentionally split into game state components (`Room`, `Player`, `D
 - Quest systems
 - Multiple save slots
 - Event scripting
-- Shops and NPC interactions
+- More shops, item rarities, and NPC interactions
