@@ -10,6 +10,14 @@ python3 dungeon_crawler.py
 
 If a `dungeon_save.json` file exists, the game asks whether you want to continue that save or start a fresh run.
 
+## Testing
+
+```bash
+python3 -m unittest discover
+```
+
+The tests use temporary save files and mock AI responses, so they do not require an OpenAI API key or network access.
+
 ## Optional ChatGPT room generation
 
 The `explore` command can call OpenAI's Responses API at runtime to create a new room. To enable live AI generation, set your API key before running the game:
