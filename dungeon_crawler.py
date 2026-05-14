@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import random
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -9,6 +12,9 @@ from typing import Dict, List, Optional
 
 SAVE_FILE = Path("dungeon_save.json")
 SAVE_VERSION = 1
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+MAX_AI_ROOMS = 5
 
 
 ENEMY_GOLD_REWARDS = {
@@ -38,6 +44,7 @@ class Room:
     locked: bool = False
     lock_reason: str = ""
     shop_items: Dict[str, int] = field(default_factory=dict)
+    ai_generated: bool = False
 
     def connect(self, direction: str, other: "Room") -> None:
         """Create a bidirectional connection between rooms."""
@@ -166,6 +173,8 @@ class DungeonGame:
                     print("Buy what?")
                 else:
                     self.buy(" ".join(args))
+            case "explore" | "generate":
+                self.generate_ai_room()
             case "drop":
                 if not args:
                     print("Drop what?")
@@ -206,8 +215,8 @@ class DungeonGame:
     def help(self) -> None:
         print(
             "Commands: help, look, go <direction>, take <item>, drop <item>, "
-            "shop, buy <item>, attack, use <item>, unlock, search, map, rest, "
-            "stats, inventory, save, load, new, quit"
+            "shop, buy <item>, explore, attack, use <item>, unlock, search, map, "
+            "rest, stats, inventory, save, load, new, quit"
         )
 
     def look(self) -> None:
@@ -223,6 +232,9 @@ class DungeonGame:
 
         if room.shop_items:
             print("A shop is here. Type 'shop' to see what is for sale.")
+
+        if self._available_ai_directions(room):
+            print("Unmapped passages nearby. Type 'explore' to generate a new room.")
 
         if room.exits:
             print("Exits:", ", ".join(room.exits.keys()))
@@ -266,6 +278,184 @@ class DungeonGame:
         self.player.inventory.remove(real_name)
         self.player.current_room.items.append(real_name)
         print(f"You dropped {real_name}.")
+
+    def _available_ai_directions(self, room: Room) -> List[str]:
+        return [direction for direction in DIRECTIONS if direction not in room.exits]
+
+    def _ai_room_count(self) -> int:
+        return sum(room.ai_generated for room in self.rooms.values())
+
+    def generate_ai_room(self) -> None:
+        room = self.player.current_room
+        directions = self._available_ai_directions(room)
+        if not directions:
+            print("There are no unmapped passages from here.")
+            return
+
+        if self._ai_room_count() >= MAX_AI_ROOMS:
+            print("The dungeon resists further expansion for now.")
+            return
+
+        direction = random.choice(directions)
+        room_data = self._request_ai_room_data(room, direction)
+        if room_data is None:
+            room_data = self._fallback_ai_room_data(room, direction)
+            print("AI room generation is unavailable, so the dungeon shifts on its own.")
+        else:
+            print("ChatGPT dreams a new chamber into the dungeon...")
+
+        name = self._unique_room_name(room_data["name"])
+        new_room = Room(
+            name,
+            room_data["description"],
+            items=room_data["items"],
+            enemy=room_data["enemy"],
+            ai_generated=True,
+        )
+        room.connect(direction, new_room)
+        self.rooms[new_room.name] = new_room
+        print(f"A new passage opens {direction} to {new_room.name}.")
+        self.player.current_room = new_room
+        self.look()
+
+    def _request_ai_room_data(self, room: Room, direction: str) -> Optional[Dict[str, object]]:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return None
+
+        model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+        prompt = (
+            "Create one compact text dungeon room as JSON only. "
+            "Schema: name string, description string, items array of strings, "
+            "enemy string or null. Keep names under 5 words. Use 0-2 items from "
+            "this list only: healing herb, small potion, lockpick, throwing dagger, "
+            "ancient coin, torch. Use enemies only from: wandering rat, cult acolyte, "
+            "skeletal guardian, or null. "
+            f"The player is exploring {direction} from {room.name}: {room.description}"
+        )
+        payload = {
+            "model": model,
+            "input": prompt,
+            "max_output_tokens": 250,
+        }
+        request = urllib.request.Request(
+            OPENAI_RESPONSES_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+            print(f"AI generation failed: {error}")
+            return None
+
+        output_text = self._strip_json_fence(self._extract_response_text(response_data))
+        if not output_text:
+            return None
+
+        try:
+            raw_room = json.loads(output_text)
+        except json.JSONDecodeError:
+            print("AI generation returned text that was not valid JSON.")
+            return None
+
+        return self._coerce_ai_room_data(raw_room)
+
+    def _extract_response_text(self, response_data: Dict[str, object]) -> str:
+        direct_text = response_data.get("output_text")
+        if isinstance(direct_text, str):
+            return direct_text.strip()
+
+        output_items = response_data.get("output", [])
+        if not isinstance(output_items, list):
+            return ""
+
+        text_parts = []
+        for item in output_items:
+            if not isinstance(item, dict):
+                continue
+            for content in item.get("content", []):
+                if isinstance(content, dict) and isinstance(content.get("text"), str):
+                    text_parts.append(content["text"])
+        return "".join(text_parts).strip()
+
+    def _strip_json_fence(self, text: str) -> str:
+        stripped = text.strip()
+        if not stripped.startswith("```"):
+            return stripped
+
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    def _coerce_ai_room_data(self, raw_room: object) -> Dict[str, object]:
+        allowed_items = {
+            "healing herb",
+            "small potion",
+            "lockpick",
+            "throwing dagger",
+            "ancient coin",
+            "torch",
+        }
+        allowed_enemies = set(ENEMY_GOLD_REWARDS) | {None}
+
+        if not isinstance(raw_room, dict):
+            raw_room = {}
+
+        name = str(raw_room.get("name") or "Shifting Chamber")[:40]
+        description = str(
+            raw_room.get("description")
+            or "A half-formed chamber settles into place around you."
+        )[:240]
+        raw_items = raw_room.get("items", [])
+        if not isinstance(raw_items, list):
+            raw_items = []
+        items = [str(item) for item in raw_items if str(item) in allowed_items][:2]
+        enemy = raw_room.get("enemy")
+        if enemy not in allowed_enemies:
+            enemy = None
+
+        return {
+            "name": name,
+            "description": description,
+            "items": items,
+            "enemy": enemy,
+        }
+
+    def _fallback_ai_room_data(self, room: Room, direction: str) -> Dict[str, object]:
+        themes = [
+            ("Mosslit Grotto", "Soft green moss lights a damp cavern beyond the old stonework."),
+            ("Clockwork Cell", "Broken brass gears tick inside the walls like a dying heart."),
+            ("Ash Library", "Shelves of burned books crumble whenever you breathe too loudly."),
+            ("Mirror Crypt", "Clouded mirrors reflect figures that are not standing behind you."),
+        ]
+        name, description = random.choice(themes)
+        possible_items = [[], ["healing herb"], ["small potion"], ["torch"], ["ancient coin"]]
+        possible_enemies = [None, "wandering rat", None, "cult acolyte"]
+        return {
+            "name": name,
+            "description": f"{description} It appeared while exploring {direction} from {room.name}.",
+            "items": random.choice(possible_items),
+            "enemy": random.choice(possible_enemies),
+        }
+
+    def _unique_room_name(self, base_name: str) -> str:
+        if base_name not in self.rooms:
+            return base_name
+
+        suffix = 2
+        while f"{base_name} {suffix}" in self.rooms:
+            suffix += 1
+        return f"{base_name} {suffix}"
 
     def show_shop(self) -> None:
         room = self.player.current_room
@@ -390,10 +580,18 @@ class DungeonGame:
             },
             "rooms": {
                 name: {
+                    "name": room.name,
+                    "description": room.description,
                     "items": room.items,
                     "enemy": room.enemy,
                     "locked": room.locked,
+                    "lock_reason": room.lock_reason,
                     "shop_items": room.shop_items,
+                    "ai_generated": room.ai_generated,
+                    "exits": {
+                        direction: target.name
+                        for direction, target in room.exits.items()
+                    },
                 }
                 for name, room in self.rooms.items()
             },
@@ -424,13 +622,44 @@ class DungeonGame:
 
         self.rooms = self._build_world()
         for name, saved_room in room_data.items():
-            room = self.rooms.get(name)
-            if not room:
+            if not isinstance(saved_room, dict):
                 continue
+            if name not in self.rooms:
+                self.rooms[name] = Room(
+                    saved_room.get("name", name),
+                    saved_room.get("description", "A restored chamber from your save."),
+                )
+
+        for name, saved_room in room_data.items():
+            room = self.rooms.get(name)
+            if not room or not isinstance(saved_room, dict):
+                continue
+            room.description = str(saved_room.get("description", room.description))
             room.items = list(saved_room.get("items", room.items))
             room.enemy = saved_room.get("enemy")
             room.locked = bool(saved_room.get("locked", room.locked))
+            room.lock_reason = str(saved_room.get("lock_reason", room.lock_reason))
             room.shop_items = dict(saved_room.get("shop_items", room.shop_items))
+            room.ai_generated = bool(saved_room.get("ai_generated", room.ai_generated))
+
+        saved_has_exits = any(
+            isinstance(saved_room, dict) and "exits" in saved_room
+            for saved_room in room_data.values()
+        )
+        if saved_has_exits:
+            for room in self.rooms.values():
+                room.exits = {}
+            for name, saved_room in room_data.items():
+                room = self.rooms.get(name)
+                if not room or not isinstance(saved_room, dict):
+                    continue
+                exits = saved_room.get("exits", {})
+                if not isinstance(exits, dict):
+                    continue
+                for direction, target_name in exits.items():
+                    target = self.rooms.get(str(target_name))
+                    if direction in DIRECTIONS and target:
+                        room.exits[direction] = target
 
         self.player = Player(
             current_room=self.rooms.get(current_room_name, self.rooms["Entrance"]),
@@ -487,6 +716,7 @@ class DungeonGame:
         print("                        +--east--> [Armory]")
         print("                        |")
         print("                        +--west--> [Merchant Nook]")
+        print("  AI-generated rooms branch from wherever you type 'explore'.")
 
     def show_inventory(self) -> None:
         print(f"HP: {self.player.hp}/{self.player.max_hp} | Gold: {self.player.gold}")
